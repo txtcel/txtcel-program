@@ -42,8 +42,7 @@ pub const MAX_TITLE_LEN: usize = 64;
 pub const INDEX_NONE: u32 = u32::MAX;
 pub const N_TREASURY_SHARDS: u16 = 512;
 pub const N_AUTHOR_FEE_SHARDS: u8 = 4;
-pub const MAX_FEE_CUT_BPS: u32 = 10_000;
-pub const MAX_BASE_FEE_BPS: u32 = 2_000;
+pub const MAX_FEE_CUT_BPS: u32 = 5_000;
 
 pub const SETTINGS_SEED: &[u8] = b"settings";
 pub const ALLOC_SEED: &[u8] = b"alloc";
