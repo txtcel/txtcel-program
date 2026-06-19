@@ -1,0 +1,19 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+# NOTE: Cargo.lock is intentionally committed for reproducible on-chain builds.
+
+# Solana build artifacts
+/dist
+*.so
+test-ledger/
+
+# Keypairs / secrets — never commit
+*-keypair.json
+*.keypair
+deploy/*.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

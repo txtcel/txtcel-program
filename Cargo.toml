@@ -1,0 +1,33 @@
+[package]
+name = "txtcel_program"
+version = "0.1.0"
+edition = "2021"
+description = "Txtcel on-chain Solana program"
+license = "MIT"
+repository = "https://github.com/txtcel/txtcel-program"
+
+[lib]
+name = "txtcel_program"
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+borsh = { version = "1.6.0", features = ["derive"] }
+solana-program = "3.0.0"
+solana-system-interface = { version = "3.0.0", features = ["bincode"] }
+solana-security-txt = "1.1.3"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+overflow-checks = false
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1
