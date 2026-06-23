@@ -1,0 +1,93 @@
+# txtcel_program
+
+> Native (non-Anchor) on-chain Solana program for Txtcel: a permanent, public,
+> on-chain channel/forum protocol. A thread (channel) owns a doubly-linked list
+> of alloc "pages"; each page holds 31 content (message) slots. Fees accrue in
+> sharded vault PDAs and are swept to the platform treasury or the thread author.
+> The program reads its program_id at runtime (no `declare_id!`), so one binary
+> runs on any cluster.
+
+This file is generated for LLM/agent consumption. The code is the source of
+truth; this file and the README are kept in sync by hand.
+
+## Repository layout
+- src/lib.rs: entrypoint, instruction dispatch, `solana_security_txt`.
+- src/instruction.rs: `ProgramInstruction` enum (Borsh) and variant indices.
+- src/state.rs: account layouts, discriminator tags, constants, PDA derivation.
+- src/error.rs: `ProtocolError` custom error codes.
+- src/content/: opaque, type-tagged message body encoding.
+- src/processor/: one handler module per instruction (`process_*`).
+
+## Core data model
+- ThreadNode: full-address (keypair) account = the channel identity. Not a PDA; its pubkey is the "seed" every child PDA derives from.
+- AllocNode: PDA [alloc, thread, alloc_seq]. 31 content slots. Doubly-linked via upper_alloc_seq + next_alloc_seq.
+- ContentNode: PDA [content, thread, alloc_seq, slot]. Header + kind:u16 + opaque body (<= MAX_BODY_LEN). New message kinds need no program upgrade.
+- ThreadAccess: PDA [access, thread]. Optional gating: enabled, admin, entry_fee, whitelist_count.
+- AccessEntry: PDA [acl, thread, wallet]. One per wallet; status allow(0)/deny(1)/fee-exempt(2).
+- AllocLikes: PDA [likes, thread, alloc_seq]. One u32 like counter per slot.
+- ProgramSettings: PDA [settings]. Global admin, treasury, four fee bps.
+- Vault shards: treasury (N_TREASURY_SHARDS=512, global) and author-fee (N_AUTHOR_FEE_SHARDS=4 per thread).
+
+## Key constants (src/state.rs)
+- CONTENT_SLOTS=31, EXTEND_THRESHOLD=16, MAX_BODY_LEN=8192, MAX_TITLE_LEN=64.
+- N_TREASURY_SHARDS=512, N_AUTHOR_FEE_SHARDS=4.
+- MAX_FEE_CUT_BPS=5000 (50% cap on any admin-set platform cut). INDEX_NONE=u32::MAX.
+- InitSettings defaults all four fee bps to 1000 (10%).
+
+## Fee model
+- Base fee (platform): base_fee_bps of the rent of any newly allocated account; always to a treasury shard.
+- Message fee (author): fixed lamports per post (ThreadNode.message_fee), split via author_fee_cut_bps.
+- Like fee (author): fixed ThreadNode.like_fee, split via like_cut_bps.
+- Entry fee (author): ThreadAccess.entry_fee on RequestAccess, split via entry_cut_bps.
+- Cut bps = the platform's share; the remainder goes to the author. Sweeps move shard balances out.
+
+## Instructions (Borsh variant index -> name -> authority)
+- 0 CreateRootAlloc -> anyone (becomes thread author)
+- 1 FillSlot -> anyone (gated); post a message; optional auto-extend; max_fee slippage cap
+- 2 PrepareAlloc -> anyone; pre-create next alloc page
+- 3 SweepTreasury -> anyone; funds only to settings.treasury
+- 4 SweepAuthorFees -> thread author (must sign)
+- 5 CloseAccount -> content author; refunds rent
+- 6 InitSettings -> program upgrade authority (once)
+- 7 SetTreasury -> admin
+- 8 InitThreadAccess -> thread author
+- 9 SetThreadAccess -> thread admin
+- 10 AddToWhitelist / 11 RemoveFromWhitelist -> thread admin
+- 12 SetMessageFee -> thread author
+- 13 SetBaseFee / 14 SetAuthorFeeCut / 15 SetEntryCut / 16 SetLikeCut -> admin
+- 17 SetLikeFee -> thread author
+- 18 SetEntryFee -> thread admin
+- 19 RequestAccess -> anyone (pay entry fee to join)
+- 20 LikeContent -> anyone; max_fee slippage cap
+- 21 AddToBlacklist / 22 RemoveFromBlacklist -> thread admin
+- 23 AppendContent -> content author, within a 120s window of created_at
+- 24 SetAdmin -> admin
+- 25 AddToFeeWhitelist / 26 RemoveFromFeeWhitelist -> thread admin
+
+## PDA seeds (src/state.rs)
+- settings: ["settings"]
+- alloc: ["alloc", thread, alloc_seq u32 le]
+- content: ["content", thread, alloc_seq u32 le, slot u8]
+- access: ["access", thread]
+- access entry: ["acl", thread, wallet]
+- likes: ["likes", thread, alloc_seq u32 le]
+- treasury shard: ["treasury_shard", shard u16 le]
+- author fee: ["author_fee", thread, shard u8]
+
+## Build, test, deploy
+- cargo build-sbf                                   # deployable .so
+- cargo build --features no-entrypoint              # host build
+- cargo test --features no-entrypoint               # unit tests
+- solana program deploy target/deploy/txtcel_program.so
+
+## Conventions for agents
+- Code is the source of truth; README.md and llms.txt are generated.
+- Account order in each process_* exactly matches the README "Accounts" tables.
+- All PDAs are re-derived in-program; never trust a caller-supplied address.
+- Gating PDAs (access/entry) sit at fixed positions so checks cannot be skipped.
+- Closed accounts are zeroed, shrunk and reassigned to the System Program (no in-tx revival).
+
+## More
+- README.md: full instruction-by-instruction reference, PDA table, error codes.
+- SECURITY.md: security policy (also embedded in the binary via solana_security_txt).
+- @txtcel/protocol: TypeScript SDK mirroring seeds, tags and instruction indices.

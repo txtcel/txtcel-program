@@ -1,8 +1,12 @@
 # txtcel_program
 
-On-chain Solana program for Txtcel - a native (non-Anchor) program written with
+On-chain Solana program for Txtcel — a native (non-Anchor) program written with
 `solana-program`. Account layouts, instruction encoding and PDA seeds are kept in
 sync with the TypeScript SDK [`@txtcel/protocol`](https://www.npmjs.com/package/@txtcel/protocol).
+
+> **Note:** This README is LLM-generated from the source and reviewed by hand.
+> The code is the source of truth. A condensed, agent-oriented overview lives in
+> [`llms.txt`](./llms.txt).
 
 ## Layout
 
@@ -44,7 +48,7 @@ cluster — no `declare_id!` to change.
 
 ## Data model overview
 
-Txtcel models a forum/chat as a **thread** (a "channel") that owns a singly
+Txtcel models a forum/chat as a **thread** (a "channel") that owns a doubly
 linked list of **alloc** nodes. Each alloc node has 31 **content** slots, and
 each content slot holds one message. Fees flow into sharded vault PDAs that are
 later swept to the platform treasury or the thread author.
@@ -52,7 +56,7 @@ later swept to the platform treasury or the thread author.
 ```
 ThreadNode (full-address account, the channel identity)
    │
-   ├─ AllocNode seq=0 ──► AllocNode seq=1 ──► AllocNode seq=2 ──► …   (linked list)
+   ├─ AllocNode seq=0 ◄─► AllocNode seq=1 ◄─► AllocNode seq=2 ◄─► …  (doubly-linked)
    │       │                     │
    │       └─ 31 ContentNode slots (one message each)
    │
@@ -225,13 +229,13 @@ write to the same thread without contending on one account.
 **Behavior** — Bounds `body` length; runs typed validation for known kinds.
 Validates shards. The `access`/`entry` PDAs are always required at fixed
 positions so gating cannot be bypassed by omitting accounts:
-- Gating is enforced only when the thread `enabled` **and** (`whitelist_count > 0`
+- Gating is enforced only when the thread is `enabled` **and** (`whitelist_count > 0`
   **or** `entry_fee > 0`). Blacklisted (`ACCESS_DENIED`) wallets are always
   rejected.
 - The thread author posts for free; others pay `message_fee` unless their entry
   is `ACCESS_FEE_EXEMPT`.
 
-Iterates candidates, skips already-filled ones, and into the first free slot:
+Iterates candidates, skips already-filled ones, and in the first free slot
 creates the content PDA, writes the `ContentHeader` (with optional reply
 pointers) + opaque body, computes `base_fee + author_fee`, enforces
 `total_fee ≤ max_fee` (**slippage protection** against fee front-running), then
