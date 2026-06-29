@@ -20,6 +20,21 @@ use crate::state::*;
 /// Effect:
 /// - Consolidates all available treasury funds from the shards into the treasury account.
 /// - Leaves each shard account at the minimum rent-exempt balance.
+///
+/// Notes:
+/// - The caller supplies the shard index for each account, so exactly one PDA is
+///   validated per shard instead of scanning the whole shard space.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for shard PDA/ownership.
+/// - `accounts` — `[settings, treasury_wallet, shard_accounts...]`.
+/// - `shard_indices` — index per shard account, positionally paired with the
+///   trailing shard accounts.
+///
+/// # Returns
+/// - `Ok(())` once each shard's excess is moved to the treasury wallet.
+/// - `ProtocolError::InvalidTreasury`/`NothingToSweep`/`InvalidShard`, or
+///   PDA/ownership errors.
 pub fn process_sweep_treasury(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -42,8 +57,6 @@ pub fn process_sweep_treasury(
     if remaining.is_empty() {
         return Err(ProtocolError::NothingToSweep.into());
     }
-    // Caller supplies the shard index for each account, so we validate exactly
-    // one PDA per shard instead of scanning the whole shard space.
     if remaining.len() != shard_indices.len() {
         return Err(ProtocolError::InvalidShard.into());
     }
@@ -57,17 +70,7 @@ pub fn process_sweep_treasury(
 
         validate_treasury_shard(program_id, shard_account, *shard_idx)?;
 
-        let excess = shard_account
-            .lamports()
-            .saturating_sub(shard_rent_min);
-
-        if excess > 0 {
-            **shard_account.lamports.borrow_mut() = shard_rent_min;
-            **treasury_wallet.lamports.borrow_mut() = treasury_wallet
-                .lamports()
-                .checked_add(excess)
-                .ok_or(ProtocolError::InvalidAccountData)?;
-        }
+        sweep_shard_excess(shard_account, treasury_wallet, shard_rent_min)?;
     }
 
     Ok(())

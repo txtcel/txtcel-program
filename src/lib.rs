@@ -25,9 +25,28 @@ solana_security_txt::security_txt! {
     contacts: "email:contract@txtcel.com",
     policy: "https://github.com/txtcel/txtcel/blob/main/SECURITY.md",
     preferred_languages: "en",
-    source_code: "https://github.com/txtcel/txtcel"
+    source_code: "https://github.com/txtcel/txtcel-protocol"
 }
 
+/// Program entrypoint: decodes the raw instruction data and dispatches to the
+/// matching `process_*` handler.
+///
+/// This is the single Borsh-decode + `match` seam between Solana's untyped byte
+/// interface and the typed handlers; every supported instruction is routed from
+/// exactly one arm here, which keeps argument forwarding in one auditable place.
+///
+/// # Parameters
+/// - `program_id` — address this program is deployed at; forwarded to every
+///   handler for PDA derivation and account-ownership checks.
+/// - `accounts` — accounts supplied by the caller, in the order the selected
+///   handler expects; their validation is delegated to that handler.
+/// - `instruction_data` — Borsh-encoded `ProgramInstruction` that selects the
+///   handler and carries its arguments.
+///
+/// # Returns
+/// - `Ok(())` when the dispatched handler succeeds.
+/// - `ProgramError::InvalidInstructionData` if the bytes do not decode to a
+///   known instruction, otherwise whatever error the handler returns.
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -39,8 +58,8 @@ pub fn process_instruction(
         ProgramInstruction::CreateRootAlloc { message_fee, treasury_shard_idx, title } => {
             process_create_root_alloc(program_id, accounts, message_fee, treasury_shard_idx, title)
         }
-        ProgramInstruction::FillSlot { kind, body, candidates, extend, treasury_shard_idx, author_fee_shard_idx, reply_alloc_seq, reply_slot, max_fee } => {
-            process_fill_slot(program_id, accounts, kind, body, candidates, extend, treasury_shard_idx, author_fee_shard_idx, reply_alloc_seq, reply_slot, max_fee)
+        ProgramInstruction::FillSlot { kind, body, candidates, treasury_shard_idx, author_fee_shard_idx, reply_alloc_seq, reply_slot, max_fee } => {
+            process_fill_slot(program_id, accounts, kind, body, candidates, treasury_shard_idx, author_fee_shard_idx, reply_alloc_seq, reply_slot, max_fee)
         }
         ProgramInstruction::PrepareAlloc { alloc_seq } => {
             process_prepare_alloc(program_id, accounts, alloc_seq)
@@ -111,5 +130,7 @@ pub fn process_instruction(
         ProgramInstruction::RemoveFromFeeWhitelist { wallet } => {
             process_remove_from_fee_whitelist(program_id, accounts, wallet)
         }
+        ProgramInstruction::Subscribe => process_subscribe(program_id, accounts),
+        ProgramInstruction::Unsubscribe => process_unsubscribe(program_id, accounts),
     }
 }

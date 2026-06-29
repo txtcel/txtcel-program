@@ -35,7 +35,7 @@ use solana_program::{
 };
 
 use crate::error::ProtocolError;
-use crate::state::{assert_owned_by, TAG_CONTENT};
+use crate::state::{assert_owned_by, assert_pda, TAG_CONTENT};
 
 mod body;
 pub use body::*;
@@ -43,7 +43,9 @@ pub use body::*;
 // ── content constants ──
 
 pub const CONTENT_SEED: &[u8] = b"content";
-pub const CONTENT_SLOTS: usize = 31;
+/// Content slots per alloc page. This is the full page capacity now that
+/// `AllocNode` stores no links — every slot is usable for content.
+pub const CONTENT_SLOTS: usize = 32;
 
 /// Maximum length, in bytes, of a content node body regardless of its type.
 pub const MAX_BODY_LEN: usize = 8192;
@@ -60,13 +62,22 @@ pub const MAX_TEXT_LEN: usize = MAX_BODY_LEN;
 /// types are added.
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct ContentHeader {
+    /// Type discriminator byte (`TAG_CONTENT`) used to verify the account kind
+    /// before trusting the rest of the bytes.
     pub tag: u8,
+    /// Allocation (page) sequence this slot belongs to; part of the content PDA.
     pub alloc_seq: u32,
+    /// Slot index within the alloc; part of the content PDA.
     pub slot: u8,
+    /// Channel this content lives in, so the node can be bound back to its thread.
     pub thread: Pubkey,
+    /// Wallet that posted the content; gates appends/close and fee exemption.
     pub author: Pubkey,
+    /// Unix timestamp of creation; anchors the append window.
     pub created_at: i64,
+    /// Alloc sequence of the message this one replies to (threading pointer).
     pub reply_alloc_seq: u32,
+    /// Slot of the message this one replies to (threading pointer).
     pub reply_slot: u8,
 }
 
@@ -84,6 +95,7 @@ impl ContentHeader {
 /// opt-in processor) decode it via the matching [`ContentBody`] implementation.
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct ContentNode {
+    /// Shared metadata (the "abstract base") for this message slot.
     pub header: ContentHeader,
     /// Message-type discriminator. Stored as a raw `u16` (not a Borsh enum) so
     /// unknown/future kinds still deserialize cleanly. Interpret via
@@ -97,12 +109,26 @@ pub struct ContentNode {
 impl ContentNode {
     /// Serialized size for a node whose body is `body_len` bytes:
     /// header + `kind` (u16) + Borsh `Vec` length prefix (u32) + body.
+    ///
+    /// # Parameters
+    /// - `body_len` — length of the body payload in bytes.
+    ///
+    /// # Returns
+    /// - Total on-chain byte size to allocate for the node.
     pub fn size(body_len: usize) -> usize {
         ContentHeader::SIZE + 2 + 4 + body_len
     }
 
     /// Builds a node from a typed body, validating it and encoding it into the
     /// opaque on-chain form. This is the recommended constructor.
+    ///
+    /// # Parameters
+    /// - `header` — the metadata (author, location, reply pointers) to attach.
+    /// - `body` — a typed message body that knows its own `KIND` and encoding.
+    ///
+    /// # Returns
+    /// - `Ok(ContentNode)` with `kind`/`body` derived from `B`.
+    /// - The body's validation/encoding error if it is invalid.
     pub fn from_body<B: ContentBody>(
         header: ContentHeader,
         body: &B,
@@ -116,12 +142,22 @@ impl ContentNode {
     }
 
     /// Convenience accessor for the message-type discriminator.
+    ///
+    /// # Returns
+    /// - The `ContentKind` parsed from the stored raw `kind`.
     pub fn content_kind(&self) -> ContentKind {
         ContentKind::from_u16(self.kind)
     }
 
     /// Decodes the body as a specific concrete type. Errors if `kind` does not
     /// match `B`'s discriminator or the bytes are malformed.
+    ///
+    /// # Parameters
+    /// - `self` — the node whose opaque body is decoded.
+    ///
+    /// # Returns
+    /// - `Ok(B)` when `kind` matches `B::KIND` and the bytes decode.
+    /// - `ProtocolError::InvalidTag` on a kind mismatch, or `B`'s decode error.
     pub fn decode_body<B: ContentBody>(&self) -> Result<B, ProgramError> {
         if self.kind != B::KIND {
             return Err(ProtocolError::InvalidTag.into());
@@ -132,6 +168,16 @@ impl ContentNode {
 
 // ── PDA derivation & loading ──
 
+/// Derives the PDA (and bump) of a content node from its thread, alloc and slot.
+///
+/// # Parameters
+/// - `program_id` — program the PDA is owned by.
+/// - `thread` — channel the content belongs to.
+/// - `alloc_seq` — allocation (page) sequence of the slot.
+/// - `slot` — slot index within the alloc.
+///
+/// # Returns
+/// - The derived content address and its bump seed.
 pub fn derive_content_pda(
     program_id: &Pubkey,
     thread: &Pubkey,
@@ -144,6 +190,19 @@ pub fn derive_content_pda(
     )
 }
 
+/// Loads and fully validates a content node from an account.
+///
+/// Verifies program ownership, the `TAG_CONTENT` tag, and that the account
+/// address matches the PDA re-derived from the decoded header, so a forged or
+/// substituted account is rejected.
+///
+/// # Parameters
+/// - `program_id` — program expected to own the account.
+/// - `account` — the account holding the serialized content node.
+///
+/// # Returns
+/// - `Ok(ContentNode)` when ownership, tag and PDA all check out.
+/// - `ProtocolError::InvalidAccountData` / `InvalidTag` / `InvalidPda` otherwise.
 pub fn load_content(program_id: &Pubkey, account: &AccountInfo) -> Result<ContentNode, ProgramError> {
     assert_owned_by(account, program_id)?;
 
@@ -161,9 +220,7 @@ pub fn load_content(program_id: &Pubkey, account: &AccountInfo) -> Result<Conten
         content.header.slot,
     );
 
-    if *account.key != expected {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(account, &expected)?;
 
     Ok(content)
 }

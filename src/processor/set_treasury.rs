@@ -5,7 +5,6 @@ use solana_program::{
     pubkey::Pubkey,
 };
 
-use crate::error::ProtocolError;
 use crate::state::*;
 
 /// Updates the treasury account in the program settings.
@@ -18,6 +17,15 @@ use crate::state::*;
 ///
 /// Effect:
 /// - Changes the destination account for collected fees and platform revenue.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for settings PDA/ownership.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `treasury` — new destination wallet for platform revenue.
+///
+/// # Returns
+/// - `Ok(())` once the new treasury is persisted.
+/// - Admin/PDA validation errors from `load_admin_settings`.
 pub fn process_set_treasury(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -27,13 +35,7 @@ pub fn process_set_treasury(
     let authority = next_account_info(account_info_iter)?;
     let settings_account = next_account_info(account_info_iter)?;
 
-    assert_signer(authority)?;
-    assert_writable(settings_account)?;
-
-    let mut settings = load_settings(program_id, settings_account)?;
-    if settings.admin != *authority.key {
-        return Err(ProtocolError::Unauthorized.into());
-    }
+    let mut settings = load_admin_settings(program_id, authority, settings_account)?;
     settings.treasury = treasury;
     settings.serialize(&mut &mut settings_account.data.borrow_mut()[..])?;
 

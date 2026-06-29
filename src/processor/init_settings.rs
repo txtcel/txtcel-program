@@ -5,7 +5,6 @@ use solana_program::{
     pubkey::Pubkey,
 };
 
-use crate::error::ProtocolError;
 use crate::state::*;
 
 /// Initializes the program settings account with default parameters and a designated treasury.
@@ -23,6 +22,16 @@ use crate::state::*;
 ///
 /// After execution:
 /// - A rent-exempt settings account exists on-chain, ready to govern fees and treasury for threads and allocations.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for settings PDA/ownership.
+/// - `accounts` — `[authority(upgrade-authority signer), settings, programdata,
+///   system]`.
+/// - `treasury` — wallet that will receive swept platform revenue.
+///
+/// # Returns
+/// - `Ok(())` once the settings account is created and initialized.
+/// - PDA/authority/`assert_uninitialized` errors, or account-creation failures.
 pub fn process_init_settings(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -40,9 +49,7 @@ pub fn process_init_settings(
     assert_system_program(system_program_account)?;
 
     let (expected_settings, settings_bump) = derive_settings_pda(program_id);
-    if *settings_account.key != expected_settings {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(settings_account, &expected_settings)?;
 
     assert_uninitialized(settings_account)?;
 

@@ -31,6 +31,17 @@ use crate::state::*;
 ///
 /// After execution:
 /// - A rent-exempt access control account exists for the thread, ready to enforce whitelist/blacklist rules and manage entry fees.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — `[authority(thread author signer), thread, access,
+///   treasury_shard, system]`.
+/// - `enabled` — whether gating starts enabled for the thread.
+/// - `treasury_shard_idx` — treasury shard collecting the rent fee.
+///
+/// # Returns
+/// - `Ok(())` once the access account is created and initialized.
+/// - `ProtocolError::Unauthorized`, PDA/`assert_uninitialized`, or fee errors.
 pub fn process_init_thread_access(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -58,9 +69,7 @@ pub fn process_init_thread_access(
 
     let (expected_access, access_bump) = derive_access_pda(program_id, &thread_key);
 
-    if *access_account.key != expected_access {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(access_account, &expected_access)?;
 
     assert_uninitialized(access_account)?;
 

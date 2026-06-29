@@ -16,6 +16,15 @@ use crate::state::*;
 ///
 /// After execution:
 /// - Users requesting access to the thread will be required to pay the new fee.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for access PDA/ownership.
+/// - `accounts` — `[authority(access admin signer), access]`.
+/// - `fee` — new entry fee in lamports.
+///
+/// # Returns
+/// - `Ok(())` once the new entry fee is persisted.
+/// - Admin/PDA validation errors from `load_admin_access`.
 pub fn process_set_entry_fee(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

@@ -1,4 +1,4 @@
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshSerialize;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
@@ -25,6 +25,20 @@ use crate::state::*;
 /// - The likes count for the specific slot is updated.
 /// - Appropriate fees are collected and distributed according to thread settings.
 /// - The likes account is initialized if it did not exist before.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — `[payer, likes, content, thread, settings, treasury_shard,
+///   author_fee_shard, system]`.
+/// - `alloc_seq` — alloc sequence of the liked content (locates the slot).
+/// - `slot` — slot index within the alloc, bounded by `CONTENT_SLOTS`.
+/// - `treasury_shard_idx` — treasury shard collecting the platform like cut.
+/// - `author_fee_shard_idx` — shard collecting the author's like share.
+/// - `max_fee` — slippage cap on the like fee.
+///
+/// # Returns
+/// - `Ok(())` once the like is recorded and any fee is split.
+/// - `ProtocolError::InvalidSlot`/`FeeExceedsMax`, or PDA/validation errors.
 #[allow(clippy::too_many_arguments)]
 pub fn process_like_content(
     program_id: &Pubkey,
@@ -51,9 +65,7 @@ pub fn process_like_content(
 
     assert_signer(payer)?;
     assert_writable(likes_account)?;
-    assert_writable(treasury_shard)?;
-    assert_writable(author_fee_shard)?;
-    assert_system_program(system_program_account)?;
+    assert_fee_shard_accounts(treasury_shard, author_fee_shard, system_program_account)?;
 
     let thread_key = *thread_account.key;
 
@@ -61,39 +73,26 @@ pub fn process_like_content(
 
     let (expected_content, _) = derive_content_pda(program_id, &thread_key, alloc_seq, slot);
 
-    if *content_account.key != expected_content {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(content_account, &expected_content)?;
 
     let thread = load_thread(program_id, thread_account)?;
 
     let settings = load_settings(program_id, settings_account)?;
 
-    let treasury_shard_bump = validate_treasury_shard(program_id, treasury_shard, treasury_shard_idx)?;
-    let author_fee_shard_bump = validate_author_fee_shard(program_id, &thread_key, author_fee_shard, author_fee_shard_idx)?;
-
-    ensure_shard_initialized(
+    prepare_fee_shards(
         program_id,
         payer,
         treasury_shard,
-        system_program_account,
-        &[TREASURY_SHARD_SEED, &treasury_shard_idx.to_le_bytes()],
-        treasury_shard_bump,
-    )?;
-    ensure_shard_initialized(
-        program_id,
-        payer,
         author_fee_shard,
         system_program_account,
-        &[AUTHOR_FEE_SEED, thread_key.as_ref(), &[author_fee_shard_idx]],
-        author_fee_shard_bump,
+        &thread_key,
+        treasury_shard_idx,
+        author_fee_shard_idx,
     )?;
 
     let (expected_likes, likes_bump) = derive_likes_pda(program_id, &thread_key, alloc_seq);
 
-    if *likes_account.key != expected_likes {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(likes_account, &expected_likes)?;
 
     if system_program::check_id(likes_account.owner) && likes_account.data_len() == 0 {
         let size = AllocLikes::size();
@@ -108,18 +107,14 @@ pub fn process_like_content(
         let likes = AllocLikes {
             tag: TAG_LIKES,
             alloc_seq,
-            counts: [0u32; NEXT_ALLOC_INDEX],
+            counts: [0u32; CONTENT_SLOTS],
         };
         likes.serialize(&mut &mut likes_account.data.borrow_mut()[..])?;
     }
 
     assert_owned_by(likes_account, program_id)?;
 
-    let mut likes = AllocLikes::try_from_slice(&likes_account.data.borrow()).map_err(|_| ProtocolError::InvalidAccountData)?;
-
-    if likes.tag != TAG_LIKES {
-        return Err(ProtocolError::InvalidTag.into());
-    }
+    let mut likes = load_alloc_likes(likes_account)?;
 
     likes.counts[slot as usize] = likes.counts[slot as usize].saturating_add(1);
     likes.serialize(&mut &mut likes_account.data.borrow_mut()[..])?;

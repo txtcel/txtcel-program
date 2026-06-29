@@ -11,6 +11,46 @@ use solana_system_interface::instruction as system_instruction;
 use crate::error::ProtocolError;
 use crate::state::*;
 
+/// Appends a chunk of opaque bytes to an existing content slot's body.
+///
+/// Used to grow a message past the single-transaction size limit: a message is
+/// posted with `fill_slot`, then extended with one or more `append_content`
+/// calls. Appending is meaningful for byte-stream kinds (e.g. text); structured
+/// kinds simply choose not to use it.
+///
+/// Authorization & validation:
+/// - `load_thread` validates the thread account (owner + tag); its key is the
+///   channel id. The content is bound to this thread (`header.thread`) so the
+///   appender cannot pass a mismatched thread to dodge the base fee.
+/// - `load_content` verifies owner + `TAG_CONTENT` + the content PDA derivation,
+///   so a forged or substituted content account is rejected.
+/// - Only the original author may append, and only within `APPEND_WINDOW_SECS`
+///   of the slot's creation.
+///
+/// Fees:
+/// - The account is resized and topped up to stay rent-exempt for the new size.
+/// - Only the platform base fee applies to appends, charged on the rent delta.
+///   The author's per-message fee is a fixed amount charged once when the slot
+///   is filled, so growing the same message does not re-charge it. The
+///   author-fee shard is still validated for a stable account layout.
+/// - Destination shards are ensured program-owned before any transfer; otherwise
+///   lamports could be sent to an uninitialized, system-owned PDA, locking the
+///   funds and permanently bricking the shard.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — `[payer(author signer), content, thread, settings,
+///   treasury_shard, author_fee_shard, system]`.
+/// - `chunk` — bytes appended to the slot's body, capped by `MAX_BODY_LEN`.
+/// - `treasury_shard_idx` — treasury shard collecting the base fee on the rent
+///   delta.
+/// - `author_fee_shard_idx` — author-fee shard (validated for layout, not
+///   re-charged).
+///
+/// # Returns
+/// - `Ok(())` once the body is grown, rent topped up, and base fee collected.
+/// - `ProtocolError::ThreadMismatch`/`Unauthorized`/`AppendWindowExpired`/
+///   `TextTooLong`, or PDA/transfer errors.
 pub fn process_append_content(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -30,27 +70,24 @@ pub fn process_append_content(
     assert_signer(payer)?;
     assert_writable(content_account)?;
     assert_owned_by(content_account, program_id)?;
-    assert_writable(treasury_shard)?;
-    assert_writable(author_fee_shard)?;
-    assert_system_program(system_program_account)?;
+    assert_fee_shard_accounts(treasury_shard, author_fee_shard, system_program_account)?;
 
-    // Validates the thread account (owner + tag); its key is the channel id.
     let _thread = load_thread(program_id, thread_account)?;
     let settings = load_settings(program_id, settings_account)?;
 
     let thread_key = *thread_account.key;
 
-    let treasury_shard_bump = validate_treasury_shard(program_id, treasury_shard, treasury_shard_idx)?;
-    // The author-fee shard is still validated for a stable account layout, but
-    // appends no longer pay the author's per-message fee (charged once on post).
-    validate_author_fee_shard(program_id, &thread_key, author_fee_shard, author_fee_shard_idx)?;
+    let (treasury_shard_bump, _) = validate_fee_shards(
+        program_id,
+        treasury_shard,
+        author_fee_shard,
+        &thread_key,
+        treasury_shard_idx,
+        author_fee_shard_idx,
+    )?;
 
-    // `load_content` verifies owner + TAG_CONTENT + the content PDA derivation,
-    // so a forged or substituted content account is rejected.
     let mut content = load_content(program_id, content_account)?;
 
-    // Bind the content to the supplied thread so the appender cannot pass a
-    // mismatched thread to dodge the base fee.
     if content.header.thread != thread_key {
         return Err(ProtocolError::ThreadMismatch.into());
     }
@@ -65,8 +102,6 @@ pub fn process_append_content(
         return Err(ProtocolError::AppendWindowExpired.into());
     }
 
-    // Appending raw bytes to the opaque body. This is meaningful for byte-stream
-    // kinds (e.g. text); structured kinds simply choose not to use append.
     let new_body_len = content.body.len() + chunk.len();
     if new_body_len > MAX_BODY_LEN {
         return Err(ProtocolError::TextTooLong.into());
@@ -97,10 +132,6 @@ pub fn process_append_content(
     let rent_delta = rent.minimum_balance(new_size).saturating_sub(rent.minimum_balance(old_size));
 
     if rent_delta > 0 {
-        // Ensure the destination shards are program-owned before transferring
-        // fees. Otherwise lamports could be sent to an uninitialized,
-        // system-owned PDA, locking the funds and permanently bricking the
-        // shard (it could never be `create_account`-ed afterwards).
         ensure_shard_initialized(
             program_id,
             payer,
@@ -110,9 +141,6 @@ pub fn process_append_content(
             treasury_shard_bump,
         )?;
 
-        // Only the platform base fee applies to appends. The author's
-        // per-message fee is a fixed amount charged once when the slot is
-        // filled, so growing the same message does not re-charge it.
         collect_base_fee(
             rent_delta,
             settings.base_fee_bps,

@@ -11,6 +11,26 @@ use solana_system_interface::instruction as system_instruction;
 use crate::error::ProtocolError;
 use crate::state::*;
 
+/// Creates a new thread (channel) together with its root allocation node.
+///
+/// Initializes the thread account and the seq-0 `AllocNode`, then charges the
+/// platform base fee on the combined rent of both accounts.
+///
+/// Notes:
+/// - The thread account is a fresh keypair that owns its address, so it must
+///   sign its own creation. There is no global counter, hence channel creation
+///   has no shared writable account and is fully parallelizable.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — `[payer, thread, alloc, settings, treasury_shard, system]`.
+/// - `message_fee` — fixed per-message author fee (lamports) for the new thread.
+/// - `treasury_shard_idx` — treasury shard collecting the base fee on creation.
+/// - `title` — channel title bytes (rejected if longer than `MAX_TITLE_LEN`).
+///
+/// # Returns
+/// - `Ok(())` once the thread and root alloc are created and the fee collected.
+/// - `ProtocolError::TextTooLong`, PDA/validation, or fee-transfer errors.
 pub fn process_create_root_alloc(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -31,9 +51,6 @@ pub fn process_create_root_alloc(
     let system_program_account = next_account_info(account_info_iter)?;
 
     assert_signer(payer)?;
-    // The thread account is a fresh keypair that owns its address; it must sign
-    // its own creation. There is no global counter, so channel creation has no
-    // shared writable account and is fully parallelizable.
     assert_signer(thread_account)?;
     assert_writable(thread_account)?;
     assert_writable(alloc_account)?;
@@ -46,9 +63,7 @@ pub fn process_create_root_alloc(
 
     let (expected_alloc, alloc_bump) = derive_alloc_pda(program_id, &thread_key, 0);
 
-    if *alloc_account.key != expected_alloc {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(alloc_account, &expected_alloc)?;
 
     let treasury_bump = validate_treasury_shard(program_id, treasury_shard, treasury_shard_idx)?;
 
@@ -119,8 +134,6 @@ pub fn process_create_root_alloc(
         tag: TAG_ALLOC,
         thread: thread_key,
         alloc_seq: 0,
-        upper_alloc_seq: INDEX_NONE,
-        next_alloc_seq: INDEX_NONE,
     };
 
     alloc.serialize(&mut &mut alloc_account.data.borrow_mut()[..])?;

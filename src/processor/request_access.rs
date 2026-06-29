@@ -21,6 +21,25 @@ use crate::state::*;
 /// 5. `[writable]` treasury_shard
 /// 6. `[writable]` author_fee_shard
 /// 7. `[]` system_program
+///
+/// Notes:
+/// - The thread account is validated (owner + tag); its key is the channel id.
+/// - Blacklisted wallets and already-granted duplicates are rejected before any
+///   fee is charged.
+/// - A successful request only reaches the entry-creation step for a brand-new
+///   entry (existing allow/deny entries are rejected above), so the payer always
+///   joins the whitelist as a fresh member.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — the account list described above, in order.
+/// - `treasury_shard_idx` — treasury shard collecting the platform entry cut.
+/// - `author_fee_shard_idx` — shard collecting the author's entry share.
+///
+/// # Returns
+/// - `Ok(())` once the entry fee is split and the allow entry created.
+/// - `ProtocolError::ThreadMismatch`/`ZeroEntryFee`/`AccessDenied`/
+///   `AccessListDuplicate`, or PDA/transfer errors.
 pub fn process_request_access(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -41,17 +60,13 @@ pub fn process_request_access(
     assert_writable(payer)?;
     assert_writable(access_account)?;
     assert_writable(entry_account)?;
-    assert_writable(treasury_shard)?;
-    assert_writable(author_fee_shard)?;
-    assert_system_program(system_program_account)?;
+    assert_fee_shard_accounts(treasury_shard, author_fee_shard, system_program_account)?;
     assert_owned_by(access_account, program_id)?;
 
     let thread_key = *thread_account.key;
 
     let (expected_access, _) = derive_access_pda(program_id, &thread_key);
-    if *access_account.key != expected_access {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(access_account, &expected_access)?;
 
     let access = load_thread_access(access_account)?;
     if access.thread != thread_key {
@@ -61,21 +76,13 @@ pub fn process_request_access(
         return Err(ProtocolError::ZeroEntryFee.into());
     }
 
-    // Validates the thread account (owner + tag); its key is the channel id.
     let _thread = load_thread(program_id, thread_account)?;
 
     let (expected_entry, _) = derive_access_entry_pda(program_id, &thread_key, payer.key);
-    if *entry_account.key != expected_entry {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(entry_account, &expected_entry)?;
 
-    // Reject blacklisted wallets and already-granted duplicates before charging.
     if !is_uninitialized(entry_account) {
-        assert_owned_by(entry_account, program_id)?;
-        let entry = load_access_entry(entry_account)?;
-        if entry.thread != thread_key || entry.wallet != *payer.key {
-            return Err(ProtocolError::ThreadMismatch.into());
-        }
+        let entry = load_bound_access_entry(program_id, entry_account, &thread_key, payer.key)?;
         if entry.status == ACCESS_DENIED {
             return Err(ProtocolError::AccessDenied.into());
         }
@@ -84,25 +91,15 @@ pub fn process_request_access(
 
     let settings = load_settings(program_id, settings_account)?;
 
-    let treasury_shard_bump = validate_treasury_shard(program_id, treasury_shard, treasury_shard_idx)?;
-    let author_fee_shard_bump = validate_author_fee_shard(program_id, &thread_key, author_fee_shard, author_fee_shard_idx)?;
-
-    ensure_shard_initialized(
+    prepare_fee_shards(
         program_id,
         payer,
         treasury_shard,
-        system_program_account,
-        &[TREASURY_SHARD_SEED, &treasury_shard_idx.to_le_bytes()],
-        treasury_shard_bump,
-    )?;
-
-    ensure_shard_initialized(
-        program_id,
-        payer,
         author_fee_shard,
         system_program_account,
-        &[AUTHOR_FEE_SEED, thread_key.as_ref(), &[author_fee_shard_idx]],
-        author_fee_shard_bump,
+        &thread_key,
+        treasury_shard_idx,
+        author_fee_shard_idx,
     )?;
 
     transfer_fee_split(
@@ -114,9 +111,6 @@ pub fn process_request_access(
         system_program_account,
     )?;
 
-    // A successful request only reaches here for a brand-new entry (existing
-    // allow/deny entries are rejected above), so the payer always joins the
-    // whitelist as a fresh member.
     set_access_entry_status(
         program_id,
         payer,

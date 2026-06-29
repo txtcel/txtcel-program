@@ -15,6 +15,15 @@ use crate::state::*;
 /// 1. `[writable]` access_account - Thread access (ThreadAccess) PDA, used to verify admin.
 /// 2. `[writable]` entry_account - AccessEntry PDA derived from [ACL_SEED, seed, wallet].
 /// 3. `[]` system_program
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — the account list described above, in order.
+/// - `wallet` — wallet whose fee-exempt entry is removed.
+///
+/// # Returns
+/// - `Ok(())` once the wallet's `ACCESS_FEE_EXEMPT` entry is closed.
+/// - Admin/PDA errors, or if no matching fee-exempt entry exists.
 pub fn process_remove_from_fee_whitelist(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -26,18 +35,12 @@ pub fn process_remove_from_fee_whitelist(
     let entry_account = next_account_info(account_info_iter)?;
     let system_program_account = next_account_info(account_info_iter)?;
 
-    assert_writable(authority)?;
-    assert_writable(entry_account)?;
-
-    let access = load_admin_access(program_id, authority, access_account)?;
-    let thread = access.thread;
-
-    close_access_entry(
+    remove_access_entry(
         program_id,
         authority,
+        access_account,
         entry_account,
         system_program_account,
-        &thread,
         &wallet,
         ACCESS_FEE_EXEMPT,
     )

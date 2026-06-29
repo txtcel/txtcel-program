@@ -21,6 +21,16 @@ use crate::state::*;
 ///
 /// Effect:
 /// - Changes how future platform operations calculate their fees or cuts.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for settings PDA/ownership.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `fee_bps` — new basis-points value, rejected above `MAX_FEE_CUT_BPS`.
+/// - `update` — closure that writes `fee_bps` into the chosen settings field.
+///
+/// # Returns
+/// - `Ok(())` once the updated settings are persisted.
+/// - `ProtocolError::InvalidFeeBps` if out of range, or admin/PDA errors.
 fn update_platform_setting(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -35,14 +45,7 @@ fn update_platform_setting(
     let authority = next_account_info(account_info_iter)?;
     let settings_account = next_account_info(account_info_iter)?;
 
-    assert_signer(authority)?;
-    assert_writable(settings_account)?;
-
-    let mut settings = load_settings(program_id, settings_account)?;
-
-    if settings.admin != *authority.key {
-        return Err(ProtocolError::Unauthorized.into());
-    }
+    let mut settings = load_admin_settings(program_id, authority, settings_account)?;
 
     update(&mut settings);
 
@@ -50,6 +53,15 @@ fn update_platform_setting(
     Ok(())
 }
 
+/// Sets the platform base fee (percentage of rent, in bps).
+///
+/// # Parameters
+/// - `program_id` — this program's address.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `fee_bps` — new base fee in basis points.
+///
+/// # Returns
+/// - `Ok(())` on success, else the error from `update_platform_setting`.
 pub fn process_set_base_fee(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -58,6 +70,15 @@ pub fn process_set_base_fee(
     update_platform_setting(program_id, accounts, fee_bps, |s| s.base_fee_bps = fee_bps)
 }
 
+/// Sets the platform's cut of the per-message author fee (in bps).
+///
+/// # Parameters
+/// - `program_id` — this program's address.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `fee_bps` — new author-fee cut in basis points.
+///
+/// # Returns
+/// - `Ok(())` on success, else the error from `update_platform_setting`.
 pub fn process_set_author_fee_cut(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -66,6 +87,15 @@ pub fn process_set_author_fee_cut(
     update_platform_setting(program_id, accounts, fee_bps, |s| s.author_fee_cut_bps = fee_bps)
 }
 
+/// Sets the platform's cut of the entry fee (in bps).
+///
+/// # Parameters
+/// - `program_id` — this program's address.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `fee_bps` — new entry-fee cut in basis points.
+///
+/// # Returns
+/// - `Ok(())` on success, else the error from `update_platform_setting`.
 pub fn process_set_entry_cut(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -74,6 +104,15 @@ pub fn process_set_entry_cut(
     update_platform_setting(program_id, accounts, fee_bps, |s| s.entry_cut_bps = fee_bps)
 }
 
+/// Sets the platform's cut of the like fee (in bps).
+///
+/// # Parameters
+/// - `program_id` — this program's address.
+/// - `accounts` — `[authority(admin signer), settings]`.
+/// - `fee_bps` — new like-fee cut in basis points.
+///
+/// # Returns
+/// - `Ok(())` on success, else the error from `update_platform_setting`.
 pub fn process_set_like_cut(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

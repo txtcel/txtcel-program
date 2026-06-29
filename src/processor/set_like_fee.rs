@@ -5,7 +5,6 @@ use solana_program::{
     pubkey::Pubkey,
 };
 
-use crate::error::ProtocolError;
 use crate::state::*;
 
 /// Updates the "like" fee for a specific thread.
@@ -17,6 +16,15 @@ use crate::state::*;
 ///
 /// Effect:
 /// - Any future likes on content within this thread will require the updated fee.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for thread PDA/ownership.
+/// - `accounts` — `[authority(thread author signer), thread]`.
+/// - `fee` — new per-like fee in lamports.
+///
+/// # Returns
+/// - `Ok(())` once the new like fee is persisted.
+/// - Author/PDA validation errors from `load_author_thread`.
 pub fn process_set_like_fee(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -26,14 +34,7 @@ pub fn process_set_like_fee(
     let authority = next_account_info(account_info_iter)?;
     let thread_account = next_account_info(account_info_iter)?;
 
-    assert_signer(authority)?;
-    assert_writable(thread_account)?;
-
-    let mut thread = load_thread(program_id, thread_account)?;
-
-    if *authority.key != thread.author {
-        return Err(ProtocolError::Unauthorized.into());
-    }
+    let mut thread = load_author_thread(program_id, authority, thread_account)?;
 
     thread.like_fee = fee;
     thread.serialize(&mut &mut thread_account.data.borrow_mut()[..])?;

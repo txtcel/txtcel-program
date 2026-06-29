@@ -48,17 +48,20 @@ cluster — no `declare_id!` to change.
 
 ## Data model overview
 
-Txtcel models a forum/chat as a **thread** (a "channel") that owns a doubly
-linked list of **alloc** nodes. Each alloc node has 31 **content** slots, and
-each content slot holds one message. Fees flow into sharded vault PDAs that are
-later swept to the platform treasury or the thread author.
+Txtcel models a forum/chat as a **thread** (a "channel") that owns a dense,
+contiguously-numbered sequence of **alloc** nodes. Each alloc node has 32
+**content** slots, and each content slot holds one message. Nodes store no
+links: they are addressed purely by their PDA (`alloc_seq` in
+`0..=last_alloc_seq`), so the sequence needs no forward/back pointers. Fees flow
+into sharded vault PDAs that are later swept to the platform treasury or the
+thread author.
 
 ```
 ThreadNode (full-address account, the channel identity)
    │
-   ├─ AllocNode seq=0 ◄─► AllocNode seq=1 ◄─► AllocNode seq=2 ◄─► …  (doubly-linked)
+   ├─ AllocNode seq=0 → seq=1 → seq=2 → …  (dense, addressed by PDA; no stored links)
    │       │                     │
-   │       └─ 31 ContentNode slots (one message each)
+   │       └─ 32 ContentNode slots (one message each)
    │
    ├─ ThreadAccess        (optional gating: enable + entry fee + whitelist counter)
    │      └─ AccessEntry   (one PDA per allow/deny/fee-exempt wallet)
@@ -78,11 +81,11 @@ distinguish account types and reject substituted accounts.
 | Tag | Const | Struct | Address kind | Purpose |
 |----:|-------|--------|--------------|---------|
 | 1 | `TAG_CONTENT` | `ContentNode` | PDA `[content, thread, alloc_seq, slot]` | A single message (header + opaque body). |
-| 2 | `TAG_ALLOC` | `AllocNode` | PDA `[alloc, thread, alloc_seq]` | A 31-slot bucket; node in the thread's linked list. |
-| 3 | `TAG_THREAD` | `ThreadNode` | Full-address (keypair) | The channel: author, title, fees, alloc list head/tail. |
+| 2 | `TAG_ALLOC` | `AllocNode` | PDA `[alloc, thread, alloc_seq]` | A 32-slot bucket; one node in the thread's dense alloc sequence. |
+| 3 | `TAG_THREAD` | `ThreadNode` | Full-address (keypair) | The channel: author, title, fees, alloc count + tail (`last_alloc_seq`). |
 | 5 | `TAG_SETTINGS` | `ProgramSettings` | PDA `[settings]` | Global admin, treasury and fee bps. |
 | 6 | `TAG_ACCESS` | `ThreadAccess` | PDA `[access, thread]` | Per-thread gating config. |
-| 7 | `TAG_LIKES` | `AllocLikes` | PDA `[likes, thread, alloc_seq]` | Like counts for one alloc's 31 slots. |
+| 7 | `TAG_LIKES` | `AllocLikes` | PDA `[likes, thread, alloc_seq]` | Like counts for one alloc's 32 slots. |
 | 9 | `TAG_ACCESS_ENTRY` | `AccessEntry` | PDA `[acl, thread, wallet]` | One wallet's allow/deny/fee-exempt status. |
 
 > The **thread** is intentionally **not** a PDA. It is a freshly generated
@@ -107,14 +110,17 @@ distinguish account types and reject substituted accounts.
 
 | Const | Value | Meaning |
 |-------|------:|---------|
-| `CONTENT_SLOTS` | 31 | Message slots per alloc node. |
-| `EXTEND_THRESHOLD` | 16 | Filled slots that trigger auto-extend. |
+| `CONTENT_SLOTS` | 32 | Message slots per alloc node. |
 | `MAX_BODY_LEN` | 8192 | Max bytes of a message body. |
 | `MAX_TITLE_LEN` | 64 | Max bytes of a thread title. |
 | `N_TREASURY_SHARDS` | 512 | Global platform vault count. |
 | `N_AUTHOR_FEE_SHARDS` | 4 | Per-thread author vault count. |
 | `MAX_FEE_CUT_BPS` | 5000 | Cap (50%) on any admin-set platform cut. |
-| `INDEX_NONE` | `u32::MAX` | "No link" sentinel for alloc pointers. |
+
+> Page extension is a **client-side** policy, not enforced on-chain: the SDK
+> pre-grows the chain (a best-effort `PrepareAlloc` in a separate transaction)
+> once a tail page reaches its fill threshold (`EXTEND_THRESHOLD = 16` in the
+> SDK). The program itself imposes no such threshold.
 
 ### Fee model
 
@@ -205,18 +211,22 @@ collects the base fee on the combined rent of thread + alloc.
 
 ---
 
-### 1. `FillSlot { kind: u16, body: Vec<u8>, candidates: Vec<CandidateSlot>, extend: bool, treasury_shard_idx: u16, author_fee_shard_idx: u8, reply_alloc_seq: u32, reply_slot: u8, max_fee: u64 }`
+### 1. `FillSlot { kind: u16, body: Vec<u8>, candidates: Vec<CandidateSlot>, treasury_shard_idx: u16, author_fee_shard_idx: u8, reply_alloc_seq: u32, reply_slot: u8, max_fee: u64 }`
 
-Posts a message into the first free slot among the `candidates`, optionally
-extending the alloc chain. Candidate-list + parallel slots let many posters
-write to the same thread without contending on one account.
+Posts a message into the first free slot among the `candidates`. This is an
+**element-only** instruction — it writes content and collects fees, and never
+touches the alloc chain. Growing the chain is `PrepareAlloc`'s sole job and is
+**decoupled** from posting (see below). Clients build the candidate set from the
+free slots of the last two pages (the rolling window of the previous page's
+leftovers plus the current tail page) and pick a few at random, so many posters
+can write to the same thread without contending on one account.
 
 **Accounts** — fixed prefix, then a variable tail:
 
 | # | Account | Flags | Notes |
 |--:|---------|-------|-------|
 | 0 | `payer` | s, w | Poster; pays fees. |
-| 1 | `thread_account` | (w if `extend`) | The channel. |
+| 1 | `thread_account` | — | The channel (read-only; never written here). |
 | 2 | `settings_account` | — | For base fee + author cut. |
 | 3 | `treasury_shard` | w | |
 | 4 | `author_fee_shard` | w | |
@@ -224,7 +234,6 @@ write to the same thread without contending on one account.
 | 6..6+N | `candidate[i]` | w | One content PDA per `CandidateSlot`. |
 | 6+N | `access_account` | — | `ThreadAccess` PDA (**mandatory**). |
 | 7+N | `entry_account` | — | Caller's `AccessEntry` PDA (**mandatory**). |
-| 8+N.. | `current_alloc`, `new_alloc` | w | Only when `extend = true`. |
 
 **Behavior** — Bounds `body` length; runs typed validation for known kinds.
 Validates shards. The `access`/`entry` PDAs are always required at fixed
@@ -241,20 +250,20 @@ pointers) + opaque body, computes `base_fee + author_fee`, enforces
 `total_fee ≤ max_fee` (**slippage protection** against fee front-running), then
 collects the base fee and the split author fee.
 
-If `extend` and the two extra alloc accounts are present and `new_alloc` is
-uninitialized, links a new alloc node onto the chain and bumps the thread's
-`alloc_count` / `last_alloc_seq`.
-
 **Errors** — `TextTooLong`, `InvalidCandidateCount`, `InvalidPda`,
 `InvalidShard`, `ThreadMismatch`, `AccessDenied`, `InvalidAllocSeq`,
-`InvalidSlot`, `NoFreeSlot`, `FeeExceedsMax`, `AllocAlreadyLinked`.
+`InvalidSlot`, `NoFreeSlot`, `FeeExceedsMax`.
 
 ---
 
 ### 2. `PrepareAlloc { alloc_seq: u32 }`
 
-Explicitly pre-creates the next alloc node (`alloc_seq + 1`) and links it. This
-is the manual counterpart to `FillSlot`'s auto-extend, useful to warm capacity.
+Pre-creates the next alloc node (`alloc_seq + 1`). This is the **sole** way to
+grow the alloc chain. Clients call it to warm capacity, **decoupled** from
+posting: once a tail page crosses the SDK's fill threshold, the client fires this
+as a separate, best-effort transaction (its failure under a concurrent extend
+race is harmless and ignored, since the post itself targets the existing free
+slots). Only the true tail (`alloc_seq == thread.last_alloc_seq`) can be grown.
 
 **Accounts**
 
@@ -267,12 +276,13 @@ is the manual counterpart to `FillSlot`'s auto-extend, useful to warm capacity.
 | 4 | `system_program` | — |
 
 **Behavior** — Loads the current alloc, checks `alloc_seq` matches and that it
-is not already linked, creates the new alloc PDA, links
-`current.next_alloc_seq → new_seq`, updates the thread's `alloc_count` /
-`last_alloc_seq`.
+is the chain's true tail (`alloc_seq == thread.last_alloc_seq`), creates the
+`new_seq` alloc PDA, and advances the thread's `alloc_count` / `last_alloc_seq`.
+The chain stores no links: nodes are densely numbered and addressed purely by
+their PDA, so `last_alloc_seq` alone marks the tail.
 
-**Errors** — `ThreadMismatch`, `InvalidAllocSeq`, `AllocAlreadyLinked`,
-`InvalidPda`, `AccountAlreadyInitialized`.
+**Errors** — `ThreadMismatch`, `InvalidAllocSeq`, `InvalidPda`,
+`AccountAlreadyInitialized`.
 
 ---
 
@@ -517,7 +527,7 @@ that exact state). **Accounts** — same as #25. **Errors** — `AccessListMissi
 | 1 | `NotWritable` | A required-writable account wasn't writable. |
 | 2 | `InvalidTag` | Account discriminator tag mismatch. |
 | 3 | `TextTooLong` | Body/title exceeds the max length. |
-| 4 | `AllocAlreadyLinked` | Alloc node already has a `next`. |
+| 4 | `AllocAlreadyLinked` | Retired (alloc chain stores no links); kept for discriminant stability. |
 | 5 | `SlotAlreadyUsed` | Slot already filled. |
 | 6 | `InvalidCandidateCount` | Empty/incorrect candidate set. |
 | 7 | `AccountOwnerMismatch` | Account not owned by the program. |

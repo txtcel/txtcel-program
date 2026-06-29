@@ -20,6 +20,17 @@ use crate::state::*;
 /// Effect:
 /// - Consolidates all available author fees from the shards into the author's account.
 /// - Leaves each shard account at the minimum rent-exempt balance.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for shard PDA/ownership.
+/// - `accounts` — `[thread, author_wallet(signer), shard_accounts...]`.
+/// - `shard_indices` — index per shard account, positionally paired with the
+///   trailing shard accounts.
+///
+/// # Returns
+/// - `Ok(())` once each shard's excess is moved to the author wallet.
+/// - `ProtocolError::InvalidAuthor`/`NothingToSweep`/`InvalidShard`, or
+///   PDA/ownership errors.
 pub fn process_sweep_author_fees(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -59,17 +70,7 @@ pub fn process_sweep_author_fees(
 
         validate_author_fee_shard(program_id, &thread_key, shard_account, *shard_idx)?;
 
-        let excess = shard_account
-            .lamports()
-            .saturating_sub(shard_rent_min);
-
-        if excess > 0 {
-            **shard_account.lamports.borrow_mut() = shard_rent_min;
-            **author_wallet.lamports.borrow_mut() = author_wallet
-                .lamports()
-                .checked_add(excess)
-                .ok_or(ProtocolError::InvalidAccountData)?;
-        }
+        sweep_shard_excess(shard_account, author_wallet, shard_rent_min)?;
     }
 
     Ok(())

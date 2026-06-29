@@ -16,6 +16,15 @@ use crate::state::*;
 ///
 /// Effect:
 /// - Enables or disables user access requests and entry checks for this thread.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for access PDA/ownership.
+/// - `accounts` — `[authority(access admin signer), access]`.
+/// - `enabled` — new gating state for the thread.
+///
+/// # Returns
+/// - `Ok(())` once the new state is persisted.
+/// - Admin/PDA validation errors from `load_admin_access`.
 pub fn process_set_thread_access(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

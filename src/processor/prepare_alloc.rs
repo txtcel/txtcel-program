@@ -13,16 +13,34 @@ use crate::state::*;
 /// Steps:
 /// 1. Validates that the payer is a signer and that the relevant accounts (current alloc, new alloc, thread) are writable.
 /// 2. Loads the current allocation node and thread, verifying that the seed and allocation sequence match expected values.
-/// 3. Checks that the current allocation is not already linked to a next allocation.
+/// 3. Confirms the current allocation is the chain's true tail (its `alloc_seq` equals the thread's `last_alloc_seq`).
 /// 4. Computes the next allocation sequence number and derives the PDA for the new allocation account, validating it matches the expected address.
 /// 5. Ensures the new allocation account is uninitialized, then creates it with the required rent-exempt lamports via `invoke_signed`.
-/// 6. Initializes the new allocation node with appropriate links to the previous allocation and serializes it to the new account.
-/// 7. Updates the current allocation's `next_alloc_seq` to point to the new allocation and serializes it back.
-/// 8. Updates the thread's allocation count and last allocation sequence, then serializes the thread account.
+/// 6. Initializes the new allocation node at `alloc_seq + 1` and serializes it to the new account.
+/// 7. Updates the thread's allocation count and last allocation sequence, then serializes the thread account.
 ///
 /// After execution:
-/// - A new allocation node is created and linked to the previous node.
+/// - A new allocation node is appended at the tail of the chain.
 /// - The thread's metadata reflects the newly created allocation.
+///
+/// Notes:
+/// - The alloc chain stores no forward/back links: nodes are addressed purely
+///   by their PDA `[ALLOC_SEED, thread, alloc_seq]` and numbered densely, so
+///   `ThreadNode.last_alloc_seq` alone marks the tail.
+/// - Only the true tail (matching the thread's `last_alloc_seq`) may be
+///   extended. Without this check, a stale node could fork the chain and
+///   regress `last_alloc_seq`.
+///
+/// # Parameters
+/// - `program_id` — this program's address, used for PDA derivation/ownership.
+/// - `accounts` — `[payer, current_alloc, new_alloc, thread, system]`.
+/// - `alloc_seq` — sequence of the current tail alloc to extend; must equal the
+///   thread's `last_alloc_seq`.
+///
+/// # Returns
+/// - `Ok(())` once the new alloc is created and the thread updated.
+/// - `ProtocolError::ThreadMismatch`/`InvalidAllocSeq`, or PDA/account-creation
+///   errors.
 pub fn process_prepare_alloc(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -43,7 +61,7 @@ pub fn process_prepare_alloc(
 
     let thread_key = *thread_account.key;
 
-    let mut current_alloc = load_alloc(program_id, current_alloc_account)?;
+    let current_alloc = load_alloc(program_id, current_alloc_account)?;
 
     if current_alloc.thread != thread_key {
         return Err(ProtocolError::ThreadMismatch.into());
@@ -53,11 +71,11 @@ pub fn process_prepare_alloc(
         return Err(ProtocolError::InvalidAllocSeq.into());
     }
 
-    if current_alloc.next_alloc_seq != INDEX_NONE {
-        return Err(ProtocolError::AllocAlreadyLinked.into());
-    }
-
     let mut thread = load_thread(program_id, thread_account)?;
+
+    if current_alloc.alloc_seq != thread.last_alloc_seq {
+        return Err(ProtocolError::InvalidAllocSeq.into());
+    }
 
     let new_seq = alloc_seq
         .checked_add(1)
@@ -65,9 +83,7 @@ pub fn process_prepare_alloc(
 
     let (expected_new, new_bump) = derive_alloc_pda(program_id, &thread_key, new_seq);
 
-    if *new_alloc_account.key != expected_new {
-        return Err(ProtocolError::InvalidPda.into());
-    }
+    assert_pda(new_alloc_account, &expected_new)?;
 
     assert_uninitialized(new_alloc_account)?;
 
@@ -86,14 +102,9 @@ pub fn process_prepare_alloc(
         tag: TAG_ALLOC,
         thread: thread_key,
         alloc_seq: new_seq,
-        upper_alloc_seq: alloc_seq,
-        next_alloc_seq: INDEX_NONE,
     };
 
     new_alloc.serialize(&mut &mut new_alloc_account.data.borrow_mut()[..])?;
-
-    current_alloc.next_alloc_seq = new_seq;
-    current_alloc.serialize(&mut &mut current_alloc_account.data.borrow_mut()[..])?;
 
     thread.alloc_count = thread.alloc_count.checked_add(1).ok_or(ProtocolError::InvalidAccountData)?;
 

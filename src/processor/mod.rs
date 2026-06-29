@@ -22,6 +22,8 @@ mod add_to_fee_whitelist;
 mod remove_from_whitelist;
 mod remove_from_blacklist;
 mod remove_from_fee_whitelist;
+mod subscribe;
+mod unsubscribe;
 
 pub use append_content::process_append_content;
 pub use close_account::process_close_account;
@@ -50,3 +52,5 @@ pub use add_to_fee_whitelist::process_add_to_fee_whitelist;
 pub use remove_from_whitelist::process_remove_from_whitelist;
 pub use remove_from_blacklist::process_remove_from_blacklist;
 pub use remove_from_fee_whitelist::process_remove_from_fee_whitelist;
+pub use subscribe::process_subscribe;
+pub use unsubscribe::process_unsubscribe;
